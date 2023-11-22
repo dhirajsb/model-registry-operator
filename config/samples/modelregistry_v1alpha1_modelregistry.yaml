@@ -16,9 +16,21 @@ spec:
     port: 8080
     serviceRoute: disabled
   postgres:
-    host: model-registry-db
+    host: model-registry-db.mr-test
     database: model-registry
     username: mlmduser
     passwordSecret:
       name: model-registry-db
       key: database-password
+#    sslPasswordSecret:
+#      name: model-registry-db-cert
+#      key: tls.key
+    sslCertificateSecret:
+      name: model-registry-db-cert
+      key: tls.crt
+    sslKeySecret:
+      name: model-registry-db-cert
+      key: tls.key
+    sslRootCertificateSecret:
+      name: model-registry-db-cert
+      key: ca.crt

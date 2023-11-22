@@ -67,6 +67,11 @@ items:
             value: /var/lib/postgresql/data/pgdata
           image: postgres:16
           imagePullPolicy: IfNotPresent
+          args:
+            - --ssl=off
+            - --ssl_cert_file=/etc/postgresql/ssl/tls.crt
+            - --ssl_key_file=/etc/postgresql/ssl/tls.key
+            - --ssl_ca_file=/etc/postgresql/ssl/ca.crt
           livenessProbe:
             exec:
               command:
@@ -92,12 +97,21 @@ items:
           volumeMounts:
           - mountPath: /var/lib/postgresql/data
             name: model-registry-db-data
+            readOnly: false
+          - mountPath: /etc/postgresql/ssl
+            name: model-registry-db-cert
+            readOnly: true
         dnsPolicy: ClusterFirst
         restartPolicy: Always
         volumes:
         - name: model-registry-db-data
           persistentVolumeClaim:
             claimName: model-registry-db
+        - name: model-registry-db-cert
+          secret:
+            secretName: model-registry-db-cert
+            defaultMode: 0600
+            optional: true
 - apiVersion: v1
   kind: Secret
   metadata:
