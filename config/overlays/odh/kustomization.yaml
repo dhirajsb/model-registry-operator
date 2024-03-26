@@ -20,9 +20,6 @@ labels:
 resources:
 - ../../default
 - ../../prometheus
-  # include maistra config for shared registries
-- ../istio
-- servicemesh-member.yaml
 
 # Config map and replacements to use params.env for use in opendatahub-operator
 configMapGenerator:
