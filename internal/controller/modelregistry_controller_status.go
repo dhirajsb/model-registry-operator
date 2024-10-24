@@ -17,12 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/go-logr/logr"
 	authorino "github.com/kuadrant/authorino/api/v1beta2"
 	modelregistryv1alpha1 "github.com/opendatahub-io/model-registry-operator/api/v1alpha1"
 	routev1 "github.com/openshift/api/route/v1"
+	"io"
 	"istio.io/client-go/pkg/apis/networking/v1beta1"
 	v1beta12 "istio.io/client-go/pkg/apis/security/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"regexp"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	klog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -55,11 +58,20 @@ const (
 	ReasonDeploymentUpdating    = "UpdatingDeployment"
 	ReasonDeploymentAvailable   = "DeploymentAvailable"
 	ReasonDeploymentUnavailable = "DeploymentUnavailable"
+	ReasonConfigurationError    = "ConfigurationError"
 
 	ReasonResourcesCreated     = "CreatedResources"
 	ReasonResourcesAvailable   = "ResourcesAvailable"
 	ReasonResourcesUnavailable = "ResourcesUnavailable"
+
+	grpcContainerName = "grpc-container"
 )
+
+// errRegexp is based on the CHECK_EQ macro output used by mlmd container.
+// For more details on Abseil logging and CHECK_EQ macro see [Abseil documentation].
+//
+// [Abseil documentation]: https://abseil.io/docs/cpp/guides/logging#CHECK
+var errRegexp = regexp.MustCompile("Check failed: absl::OkStatus\\(\\) == status \\(OK vs. ([^)]+)\\) (.*)")
 
 func (r *ModelRegistryReconciler) setRegistryStatus(ctx context.Context, req ctrl.Request, operationResult OperationResult) (bool, error) {
 	log := klog.FromContext(ctx)
@@ -197,6 +209,21 @@ func (r *ModelRegistryReconciler) CheckPodStatus(ctx context.Context, req ctrl.R
 		failedContainers := make(map[string]string)
 		for _, s := range p.Status.ContainerStatuses {
 			if !s.Ready {
+				// look for MLMD container errors
+				if s.Name == grpcContainerName {
+					// check container log for MLMD errors
+					dbError, err := r.getGrpcContainerDBerror(ctx, p)
+					if err != nil {
+						// log K8s error
+						r.Log.Error(err, "failed to get grpc container error")
+					}
+					if dbError != nil {
+						// MLMD errors take priority
+						reason = ReasonConfigurationError
+						message = fmt.Sprintf("Metadata database configuration error: %s", dbError)
+						return available, reason, message
+					}
+				}
 				if s.State.Waiting != nil {
 					failedContainers[s.Name] = fmt.Sprintf("{waiting: {reason: %s, message: %s}}", s.State.Waiting.Reason, s.State.Waiting.Message)
 				} else if s.State.Terminated != nil {
@@ -240,6 +267,29 @@ func (r *ModelRegistryReconciler) CheckPodStatus(ctx context.Context, req ctrl.R
 	}
 
 	return available, reason, message
+}
+
+// getGrpcContainerDBerror scrapes container log and returns a database connection error if it exists in the logs
+// it also returns a k8s API error if it cannot read the container log
+func (r *ModelRegistryReconciler) getGrpcContainerDBerror(ctx context.Context, pod corev1.Pod) (error, error) {
+	request := r.ClientSet.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: grpcContainerName})
+	podLogs, err := request.Stream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer podLogs.Close()
+
+	buf := new(bytes.Buffer)
+	_, err = io.Copy(buf, podLogs)
+	if err != nil {
+		return nil, err
+	}
+	logText := buf.String()
+	submatch := errRegexp.FindStringSubmatch(logText)
+	if len(submatch) > 0 {
+		return fmt.Errorf("%s: %s", submatch[2], submatch[1]), nil
+	}
+	return nil, nil
 }
 
 func (r *ModelRegistryReconciler) SetIstioAndGatewayConditions(ctx context.Context, req ctrl.Request,
